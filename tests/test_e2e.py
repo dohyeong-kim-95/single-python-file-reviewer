@@ -74,3 +74,31 @@ def test_cli_runs_on_synthetic_5k_no_llm(tmp_path):
     assert rc == 0
     md = out.read_text(encoding="utf-8")
     assert "5218" in md or "5217" in md or "Summary" in md
+
+
+def test_cli_default_out_creates_reviews_dir(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    src = Path(__file__).parent / "fixtures" / "small_app.py"
+    rc = main([str(src), "--no-llm"])
+    assert rc == 0
+    out = tmp_path / "reviews" / "small_app.md"
+    assert out.is_file()
+    md = out.read_text(encoding="utf-8")
+    assert "Tkinter Code Review" in md
+
+
+def test_cli_handles_cp949_source(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    src = tmp_path / "korean.py"
+    src.write_bytes(
+        "# 한글 주석\n"
+        "import tkinter as tk\n"
+        "root = tk.Tk()\n"
+        "root.mainloop()\n".encode("cp949")
+    )
+    rc = main([str(src), "--no-llm"])
+    assert rc == 0
+    out = tmp_path / "reviews" / "korean.md"
+    assert out.is_file()
+    md = out.read_text(encoding="utf-8")
+    assert "Tkinter Code Review" in md

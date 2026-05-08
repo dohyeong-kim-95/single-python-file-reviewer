@@ -21,10 +21,11 @@
 ## 사용법
 
 ```bash
-# 절대경로/상대경로 모두 허용
+# 절대경로/상대경로 모두 허용. 결과는 기본적으로 ./reviews/<파일명>.md 에 저장.
 python -m reviewer /path/to/big_app.py
+# -> ./reviews/big_app.md 가 생성됨 (없으면 reviews/ 폴더 자동 생성)
 
-# 정적 분석만 (opencode 미설치/오프라인 환경)
+# 출력 경로를 직접 지정
 python -m reviewer ./big_app.py --no-llm --out report.md
 
 # opencode 호출 옵션 전달
@@ -33,6 +34,10 @@ python -m reviewer big_app.py \
     --opencode-extra-args "--model qwen2.5-coder" \
     --max-workers 4 --timeout 120
 ```
+
+입력 파일 인코딩은 UTF-8 → UTF-8-SIG → CP949 → EUC-KR → latin-1 순으로 자동
+폴백한다 (한국어 윈도우에서 작성된 CP949 파일도 그대로 읽힘). UTF-8이 아닌
+인코딩으로 읽으면 INFO 로그에 표시된다.
 
 `opencode` 가 표준입력으로 프롬프트를 받을 수 있다고 가정한다. 다른 호출
 방식이 필요하면 `reviewer/opencode_client.py`의 `_run_once` 만 수정하면 된다.
@@ -47,6 +52,7 @@ python -m reviewer big_app.py \
 | `reviewer/opencode_client.py` | opencode CLI subprocess 래퍼, JSON 추출 |
 | `reviewer/aggregator.py`      | 정적 + LLM finding 병합/중복제거/정렬 |
 | `reviewer/reporter.py`        | Markdown 리포트 렌더 |
+| `reviewer/io_utils.py`        | 소스 파일 인코딩 폴백 (UTF-8 → CP949 → ...) |
 | `reviewer/cli.py`             | argparse 진입점, 병렬 실행 |
 
 ## 검사하는 Tkinter 패턴 (초기)

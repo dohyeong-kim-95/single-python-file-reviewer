@@ -13,6 +13,7 @@ from typing import Optional
 from . import __version__
 from .aggregator import merge
 from .chunker import DEFAULT_MAX_CHARS, split
+from .io_utils import read_source_text
 from .opencode_client import OpencodeClient, OpencodeConfig
 from .reporter import render
 from .static_analyzer import analyze
@@ -33,7 +34,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(f"error: not a .py file: {target}", file=sys.stderr)
         return 2
 
-    source = target.read_text(encoding="utf-8")
+    source, used_enc = read_source_text(target)
+    if used_enc != "utf-8-sig":
+        logging.info("decoded %s using fallback encoding %s", target, used_enc)
     project = analyze(source)
     chunks = split(source, project, max_chars=args.token_budget)
     logging.info(
@@ -67,10 +70,14 @@ def main(argv: Optional[list[str]] = None) -> int:
     output = render(report)
 
     if args.out:
-        Path(args.out).write_text(output, encoding="utf-8")
-        logging.info("wrote %s", args.out)
+        out_path = Path(args.out)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
     else:
-        sys.stdout.write(output)
+        reviews_dir = Path.cwd() / "reviews"
+        reviews_dir.mkdir(parents=True, exist_ok=True)
+        out_path = reviews_dir / f"{target.stem}.md"
+    out_path.write_text(output, encoding="utf-8")
+    logging.info("wrote %s", out_path)
 
     return 0
 
@@ -82,7 +89,8 @@ def _parse_args(argv: Optional[list[str]]) -> argparse.Namespace:
                     "for weak (Qwen-3.5 class) LLMs accessed via opencode.",
     )
     p.add_argument("file", help="absolute or relative path to a single .py file")
-    p.add_argument("--out", help="write Markdown report to this path (default: stdout)")
+    p.add_argument("--out", help="write Markdown report to this path "
+                                  "(default: ./reviews/<file>.md)")
     p.add_argument("--max-workers", type=int, default=4)
     p.add_argument("--token-budget", type=int, default=DEFAULT_MAX_CHARS,
                    help="approximate per-chunk character budget")
