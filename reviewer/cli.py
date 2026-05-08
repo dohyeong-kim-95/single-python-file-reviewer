@@ -70,12 +70,34 @@ def main(argv: Optional[list[str]] = None) -> int:
             futures = {ex.submit(client.review_chunk, c): c for c in chunks}
             for fut in as_completed(futures):
                 chunk = futures[fut]
-                result: ChunkResult = fut.result()
+                # Defensive: any exception from review_chunk (decode errors,
+                # subprocess oddities, AST surprises) becomes a recorded
+                # ChunkResult failure so the rest of the run still completes.
+                try:
+                    result: ChunkResult = fut.result()
+                except Exception as e:
+                    logging.warning(
+                        "chunk %s raised %s: %s",
+                        chunk.chunk_id, type(e).__name__, e,
+                    )
+                    result = ChunkResult(
+                        chunk_id=chunk.chunk_id,
+                        prompt="",
+                        stdout="",
+                        parsed=None,
+                        error=f"{type(e).__name__}: {e}",
+                    )
                 chunk_results.append(result)
                 if result.error:
                     logging.warning("chunk %s failed: %s", chunk.chunk_id, result.error)
                 if run_dir is not None:
-                    _write_chunk_artifacts(run_dir, result)
+                    try:
+                        _write_chunk_artifacts(run_dir, result)
+                    except Exception as e:
+                        logging.warning(
+                            "could not write artifacts for chunk %s: %s",
+                            chunk.chunk_id, e,
+                        )
 
     llm_findings = [f for r in chunk_results for f in r.findings]
     rejected: list[RejectedFinding] = [rj for r in chunk_results for rj in r.rejected]
@@ -166,15 +188,24 @@ def _write_static_context(run_dir: Path, project: ProjectContext) -> None:
 def _write_chunk_artifacts(run_dir: Path, result: ChunkResult) -> None:
     safe_id = _slug(result.chunk_id)
     chunks_dir = run_dir / "chunks"
-    (chunks_dir / f"{safe_id}.prompt.txt").write_text(result.prompt, encoding="utf-8")
-    (chunks_dir / f"{safe_id}.stdout.txt").write_text(result.stdout, encoding="utf-8")
+    # errors="replace" keeps artifact dumps robust against weird bytes
+    # that might already have leaked through earlier (defense in depth).
+    (chunks_dir / f"{safe_id}.prompt.txt").write_text(
+        result.prompt, encoding="utf-8", errors="replace",
+    )
+    (chunks_dir / f"{safe_id}.stdout.txt").write_text(
+        result.stdout, encoding="utf-8", errors="replace",
+    )
     if result.parsed is not None:
         (chunks_dir / f"{safe_id}.parsed.json").write_text(
             json.dumps(result.parsed, ensure_ascii=False, indent=2),
             encoding="utf-8",
+            errors="replace",
         )
     if result.error:
-        (chunks_dir / f"{safe_id}.error.txt").write_text(result.error, encoding="utf-8")
+        (chunks_dir / f"{safe_id}.error.txt").write_text(
+            result.error, encoding="utf-8", errors="replace",
+        )
 
 
 def _write_dropped(run_dir: Path, rejected: list[RejectedFinding]) -> None:

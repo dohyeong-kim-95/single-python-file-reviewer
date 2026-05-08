@@ -104,11 +104,17 @@ class OpencodeClient:
         with tempfile.TemporaryDirectory(prefix="reviewer-opencode-") as tmp:
             cmd = [self.config.bin_path, *self.config.extra_args]
             log.debug("opencode cmd=%s cwd=%s", cmd, tmp)
+            # Force utf-8 with replacement so a single stray byte never
+            # crashes the run on locales where the default is cp949/euc-kr.
+            # opencode/LLM output is overwhelmingly utf-8; replacement chars
+            # in occasional bad bytes are far better than a hard failure.
             proc = subprocess.run(
                 cmd,
                 input=prompt,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=self.config.timeout_sec,
                 cwd=tmp,
                 check=False,

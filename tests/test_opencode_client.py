@@ -121,3 +121,54 @@ def test_garbage_returns_error(tmp_path, chunk_with_pack):
     assert result.error is not None and "JSON" in result.error
     assert result.parsed is None
     assert result.stdout != ""  # captured for artifact
+
+
+def test_utf8_stdout_bytes_decode_cleanly(tmp_path, chunk_with_pack, monkeypatch):
+    """Simulate a Korean-Windows locale (cp949) and ensure opencode's
+    UTF-8 stdout (e.g. em-dash 0xe2 0x80 0x94, Korean) does NOT crash.
+    """
+    monkeypatch.setenv("LC_ALL", "ko_KR.cp949")
+    monkeypatch.setenv("LANG", "ko_KR.cp949")
+    line = next(i for i, ln in enumerate(chunk_with_pack.code.splitlines(), chunk_with_pack.start_line)
+                if "self.left.pack" in ln)
+    # Message contains UTF-8 bytes that cp949 cannot decode (em-dash + Korean).
+    payload = json.dumps({"findings": [_finding_obj(
+        line, "self.left.pack(side=\"left\")",
+        message="가독성 — 한글 메시지",
+    )]}, ensure_ascii=False)
+    stub = _write_stub(tmp_path, payload)
+    client = OpencodeClient(OpencodeConfig(bin_path=str(stub), retries=0))
+    result = client.review_chunk(chunk_with_pack)
+    assert result.error is None
+    assert len(result.findings) == 1
+    assert "한글 메시지" in result.findings[0].message
+    # 0xe2 0x80 0x94 round-trips as the em-dash character.
+    assert "—" in result.findings[0].message
+
+
+def test_invalid_utf8_bytes_replaced_not_raised(tmp_path, chunk_with_pack):
+    """A stub that writes invalid UTF-8 bytes between two valid JSON parts
+    should not raise; bad bytes get U+FFFD and JSON extraction still finds
+    the object.
+    """
+    stub = tmp_path / "fake_opencode_badbytes"
+    # Header chatter with invalid UTF-8 byte 0xFF, then a clean JSON object.
+    bad_header = b"warning: \xff\xff some banner\n"
+    payload = (
+        b'{"findings": [{"severity": "low", "category": "x", '
+        b'"line": 1, "message": "m", "suggestion": "s", '
+        b'"confidence": "low", "evidence": "self.left = tk.Frame(root)"}]}\n'
+    )
+    stub.write_bytes(b"#!/bin/bash\ncat > /dev/null\nprintf '%s' '" +
+                     bad_header.replace(b"'", b"'\\''") +
+                     b"'\nprintf '%s\\n' '" + payload + b"'\n")
+    stub.chmod(stub.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+    client = OpencodeClient(OpencodeConfig(bin_path=str(stub), retries=0))
+    result = client.review_chunk(chunk_with_pack)
+    # Either we extract the JSON cleanly, OR we report a clean error;
+    # we must NOT raise UnicodeDecodeError.
+    assert result.error is None or "JSON" in result.error
+    if result.parsed is not None:
+        # Replacement char from the bad bytes is fine; the JSON still parsed.
+        assert "findings" in result.parsed

@@ -143,6 +143,29 @@ def test_cli_default_run_dir_under_reviews(tmp_path, monkeypatch):
     assert (run_dir / "static_context.json").is_file()
 
 
+def test_cli_loop_absorbs_unexpected_chunk_exception(tmp_path, monkeypatch):
+    """If review_chunk raises (e.g. a stray UnicodeDecodeError), the CLI
+    must log it as a chunk failure and still produce report.md."""
+    monkeypatch.chdir(tmp_path)
+    src = Path(__file__).parent / "fixtures" / "small_app.py"
+
+    from reviewer import cli as cli_mod
+
+    class BoomClient:
+        def __init__(self, *_a, **_k): pass
+        def review_chunk(self, chunk):
+            raise UnicodeDecodeError("cp949", b"\xe2", 0, 1, "boom from review_chunk")
+
+    monkeypatch.setattr(cli_mod, "OpencodeClient", BoomClient)
+    rc = main([str(src), "--max-workers", "1", "--timeout", "5"])
+    assert rc == 0
+    run_dir = next(iter((tmp_path / "reviews").iterdir()))
+    md = (run_dir / "report.md").read_text(encoding="utf-8")
+    assert "Tkinter Code Review" in md
+    # Failures section lists each chunk's error
+    assert "boom from review_chunk" in md or "UnicodeDecodeError" in md
+
+
 def test_cli_handles_cp949_source(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     src = tmp_path / "korean.py"
