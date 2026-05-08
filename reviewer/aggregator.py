@@ -14,6 +14,7 @@ def merge(
     project: ProjectContext,
     llm_findings: Iterable[Finding],
     chunk_failures: Iterable[str] = (),
+    rejected_count: int = 0,
 ) -> Report:
     findings: list[Finding] = []
 
@@ -36,6 +37,7 @@ def merge(
         project=project,
         findings=findings,
         chunk_failures=list(chunk_failures),
+        rejected_count=rejected_count,
     )
 
 

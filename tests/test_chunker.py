@@ -71,3 +71,18 @@ def test_small_file_single_chunk_behavior():
     chunks = split(src, ctx, max_chars=20_000)
     titles = [c.title for c in chunks]
     assert any("class App" in t for t in titles)
+
+
+def test_inbound_context_attached_to_chunk_with_handler_method():
+    """The chunk that contains class App should expose, in inbound_md, the
+    fact that App.on_submit is registered via bind(<Return>) elsewhere
+    in the same class."""
+    src = SMALL.read_text(encoding="utf-8")
+    ctx = analyze(src)
+    chunks = split(src, ctx, max_chars=20_000)
+    app_chunk = next(c for c in chunks if "class App" in c.title)
+    inbound = app_chunk.context.inbound_md
+    assert "on_submit" in inbound
+    assert "<Return>" in inbound
+    # `tick` is registered via after(); should also surface
+    assert "tick" in inbound

@@ -21,12 +21,19 @@
 ## 사용법
 
 ```bash
-# 절대경로/상대경로 모두 허용. 결과는 기본적으로 ./reviews/<파일명>.md 에 저장.
+# 절대경로/상대경로 모두 허용. 매 실행마다 timestamped run dir 가 생성된다.
 python -m reviewer /path/to/big_app.py
-# -> ./reviews/big_app.md 가 생성됨 (없으면 reviews/ 폴더 자동 생성)
+# -> ./reviews/<YYYYMMDD-HHMMSS>_big_app/
+#       report.md
+#       static_context.json
+#       chunks/<chunk_id>.{prompt,stdout,parsed,error}.*
+#       dropped_findings.jsonl   (검증 실패한 LLM finding 이 있을 때만)
 
-# 출력 경로를 직접 지정
+# 출력 경로를 직접 지정 (artifacts dir 는 그대로 reviews/ 아래에 생성됨)
 python -m reviewer ./big_app.py --no-llm --out report.md
+
+# artifacts 끄기
+python -m reviewer big_app.py --no-artifacts
 
 # opencode 호출 옵션 전달
 python -m reviewer big_app.py \
@@ -35,12 +42,37 @@ python -m reviewer big_app.py \
     --max-workers 4 --timeout 120
 ```
 
+`./reviews/` 는 `.gitignore` 에 등록되어 있으므로 커밋되지 않는다.
+
 입력 파일 인코딩은 UTF-8 → UTF-8-SIG → CP949 → EUC-KR → latin-1 순으로 자동
 폴백한다 (한국어 윈도우에서 작성된 CP949 파일도 그대로 읽힘). UTF-8이 아닌
 인코딩으로 읽으면 INFO 로그에 표시된다.
 
 `opencode` 가 표준입력으로 프롬프트를 받을 수 있다고 가정한다. 다른 호출
 방식이 필요하면 `reviewer/opencode_client.py`의 `_run_once` 만 수정하면 된다.
+
+## LLM finding 검증
+
+약한 모델이 만들어낸 finding 은 다음 두 단계를 모두 통과해야 최종 리포트에
+실린다.
+
+1. **line range** — `line` 값이 해당 청크의 라인 범위 안이어야 한다. 범위 밖
+   값은 클램프하지 않고 그대로 폐기한다.
+2. **evidence** — `evidence` 필드(해당 라인 원문 발췌)가 청크 코드의
+   `line ± 2` 라인 안에서 공백 정규화 후 substring 으로 나타나야 한다.
+
+폐기된 항목은 final report 에서 제외되지만 `dropped_findings.jsonl` 에
+원본 페이로드와 폐기 사유(`out-of-range`, `evidence-missing`, `schema`)가
+함께 기록된다. Summary 섹션에 폐기 개수만 표시된다.
+
+## Inbound context
+
+5000+ 라인 단일 파일 Tkinter 코드는 `__init__` 에서 `bind`/`command`/`after`/
+`trace`/`protocol` 로 핸들러를 등록하고 실제 로직은 다른 메서드에 두는 패턴이
+많다. 약한 LLM 이 호출 관계를 추적하지 못해 오판하는 일을 줄이기 위해, 각
+청크 프롬프트에는 “이 청크의 메서드가 다른 어디에서 핸들러로 등록되는지”
+표(inbound)가 첨부된다. (1차 MVP 기준 Tkinter 핸들러 등록만; 일반
+`self.<attr>` 호출 그래프는 추후.)
 
 ## 구성 요소
 

@@ -63,3 +63,21 @@ def test_event_bindings_captured():
     ctx = _ctx()
     kinds = {b.kind for b in ctx.bindings}
     assert {"bind", "command", "after"}.issubset(kinds)
+
+
+def test_handler_inbound_index_built():
+    ctx = _ctx()
+    # `bind("<Return>", self.on_submit)` → on_submit indexed
+    assert "on_submit" in ctx.handler_inbound
+    inbound = ctx.handler_inbound["on_submit"]
+    assert any(b.kind == "bind" and b.sequence == "<Return>" for b in inbound)
+    # `after(1000, self.tick)` → tick indexed
+    assert "tick" in ctx.handler_inbound
+    assert any(b.kind == "after" for b in ctx.handler_inbound["tick"])
+
+
+def test_handler_inbound_skips_lambdas_and_call_results():
+    """`command=self._go()` is the immediate-call mistake; we must not index
+    `_go` from its handler_repr `self._go()`."""
+    ctx = _ctx()
+    assert "_go" not in ctx.handler_inbound

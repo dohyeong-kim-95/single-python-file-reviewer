@@ -248,6 +248,8 @@ def _slice_context(ctx: ProjectContext, start: int, end: int) -> ContextSlice:
         [[str(s.line), s.severity, s.category, s.message] for s in smells_in],
     ) if smells_in else "_(정적 스멜 없음)_"
 
+    inbound_md = _build_inbound_md(ctx, start, end)
+
     notes: list[str] = []
     if not ctx.has_wm_delete_protocol and ctx.has_mainloop:
         notes.append("프로젝트 전체적으로 WM_DELETE_WINDOW 프로토콜 누락.")
@@ -258,7 +260,43 @@ def _slice_context(ctx: ProjectContext, start: int, end: int) -> ContextSlice:
         widget_tree_md=widget_md,
         bindings_md=bind_md,
         smells_md=smell_md,
+        inbound_md=inbound_md,
         notes=notes,
+    )
+
+
+def _build_inbound_md(ctx: ProjectContext, start: int, end: int) -> str:
+    """For each method whose body lives inside [start, end], list every
+    Tkinter binding (anywhere in the file) that registers it as a handler.
+    """
+    rows: list[list[str]] = []
+    for cls in ctx.classes:
+        for m in cls.methods:
+            if not (start <= m.lineno and m.end_lineno <= end):
+                continue
+            for b in ctx.handler_inbound.get(m.name, ()):
+                rows.append([
+                    f"{cls.name}.{m.name}",
+                    b.kind,
+                    str(b.sequence) if b.sequence else "",
+                    f"line {b.line}",
+                    b.handler_repr,
+                ])
+    for fn in ctx.top_level_funcs:
+        if not (start <= fn.lineno and fn.end_lineno <= end):
+            continue
+        for b in ctx.handler_inbound.get(fn.name, ()):
+            rows.append([
+                fn.name,
+                b.kind,
+                str(b.sequence) if b.sequence else "",
+                f"line {b.line}",
+                b.handler_repr,
+            ])
+    if not rows:
+        return "_(이 청크의 메서드는 Tkinter 핸들러로 등록된 흔적이 없음)_"
+    return _md_table(
+        ["method", "kind", "sequence", "registered_at", "handler_expr"], rows
     )
 
 

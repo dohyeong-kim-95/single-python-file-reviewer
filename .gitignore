@@ -7,3 +7,6 @@ __pycache__/
 .env
 build/
 dist/
+
+# Per-run review artifacts (timestamped subdirs + reports)
+/reviews/

@@ -28,6 +28,11 @@ def render(report: Report) -> str:
 def _summary_section(report: Report) -> str:
     sev_counts = Counter(f.severity for f in report.findings)
     src_counts = Counter(f.source for f in report.findings)
+    rejected_line = (
+        f"  \n- LLM이 보고했으나 evidence/range 검증 실패로 폐기된 항목: "
+        f"**{report.rejected_count}** (artifacts/dropped_findings.jsonl 참고)"
+        if report.rejected_count else ""
+    )
     line = (
         f"- 파일 라인 수: **{report.line_count}**  \n"
         f"- 발견 항목: **{len(report.findings)}** "
@@ -37,6 +42,7 @@ def _summary_section(report: Report) -> str:
         f"info {sev_counts.get('info', 0)})  \n"
         f"- 출처: static {src_counts.get('static', 0)}, "
         f"llm {src_counts.get('llm', 0)}"
+        f"{rejected_line}"
     )
     return f"## Summary\n\n{line}"
 

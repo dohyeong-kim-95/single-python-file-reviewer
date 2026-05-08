@@ -1,25 +1,28 @@
 """Subprocess wrapper around the `opencode` CLI.
 
-The harness treats opencode as a stateless `prompt -> text` function:
-- Each call gets a fresh temporary working directory so opencode's
-  session/history (if any) cannot leak across chunks.
-- The user prompt is fed via stdin (most opencode-like CLIs accept this);
-  if a future opencode build requires a flag, change `_run_once()` only.
-- The response is parsed by extracting the first balanced JSON object,
-  because weak models often wrap output in chatter or code fences.
+Treats opencode as a stateless `prompt -> text` function and validates
+the response strictly:
+- The first balanced JSON object is extracted from arbitrary CLI output.
+- Each finding's `line` must fall inside the chunk's range.
+- Each finding's `evidence` must appear (substring, whitespace-collapsed)
+  in the chunk source within ±2 lines of the reported line.
+- Findings that fail validation are NOT clamped or invented; they are
+  returned as RejectedFinding entries so the caller can write them to
+  artifacts and exclude them from the user-facing report.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import re
 import shutil
 import subprocess
 import tempfile
 from dataclasses import dataclass
 from typing import Optional
 
-from .models import Chunk, Finding
+from .models import Chunk, ChunkResult, Finding, RejectedFinding
 from .prompts import SYSTEM_PROMPT, build_user_prompt
 
 log = logging.getLogger(__name__)
@@ -47,16 +50,17 @@ class OpencodeClient:
                 config.bin_path,
             )
 
-    def review_chunk(self, chunk: Chunk) -> tuple[list[Finding], Optional[str]]:
-        """Returns (findings, error_message). error_message is None on success."""
+    def review_chunk(self, chunk: Chunk) -> ChunkResult:
         user_prompt = build_user_prompt(chunk)
         full_prompt = SYSTEM_PROMPT + "\n\n" + user_prompt
 
+        last_stdout = ""
         last_error: Optional[str] = None
+        payload: Optional[dict] = None
         for attempt in range(self.config.retries + 1):
             try:
-                stdout = self._run_once(full_prompt)
-                payload = _extract_json(stdout)
+                last_stdout = self._run_once(full_prompt)
+                payload = _extract_json(last_stdout)
                 if payload is None:
                     last_error = "JSON 객체를 추출하지 못함"
                     full_prompt = (
@@ -65,14 +69,36 @@ class OpencodeClient:
                         + user_prompt
                     )
                     continue
-                return _payload_to_findings(payload, chunk), None
+                last_error = None
+                break
             except subprocess.TimeoutExpired:
                 last_error = f"opencode timeout > {self.config.timeout_sec}s"
             except OpencodeError as e:
                 last_error = str(e)
             except Exception as e:  # pragma: no cover - defensive
                 last_error = f"{type(e).__name__}: {e}"
-        return [], last_error
+
+        if payload is None:
+            return ChunkResult(
+                chunk_id=chunk.chunk_id,
+                prompt=full_prompt,
+                stdout=last_stdout,
+                parsed=None,
+                findings=[],
+                rejected=[],
+                error=last_error,
+            )
+
+        findings, rejected = _validate_payload(payload, chunk)
+        return ChunkResult(
+            chunk_id=chunk.chunk_id,
+            prompt=full_prompt,
+            stdout=last_stdout,
+            parsed=payload,
+            findings=findings,
+            rejected=rejected,
+            error=None,
+        )
 
     def _run_once(self, prompt: str) -> str:
         with tempfile.TemporaryDirectory(prefix="reviewer-opencode-") as tmp:
@@ -95,7 +121,7 @@ class OpencodeClient:
 
 
 # ---------------------------------------------------------------------------
-# Output parsing
+# Output parsing & validation
 # ---------------------------------------------------------------------------
 
 def _extract_json(text: str) -> Optional[dict]:
@@ -133,25 +159,84 @@ def _extract_json(text: str) -> Optional[dict]:
     return None
 
 
-def _payload_to_findings(payload: dict, chunk: Chunk) -> list[Finding]:
-    out: list[Finding] = []
+_WS_RE = re.compile(r"\s+")
+
+
+def _norm_ws(s: str) -> str:
+    return _WS_RE.sub(" ", s).strip().lower()
+
+
+def _validate_payload(payload: dict, chunk: Chunk) -> tuple[list[Finding], list[RejectedFinding]]:
+    findings: list[Finding] = []
+    rejected: list[RejectedFinding] = []
     raw = payload.get("findings") or []
     if not isinstance(raw, list):
-        return out
+        return findings, [RejectedFinding(
+            chunk_id=chunk.chunk_id, reason="schema",
+            raw={"error": "findings field is not a list", "payload": payload},
+        )]
+
+    chunk_lines = chunk.code.splitlines()
+
     for item in raw:
         if not isinstance(item, dict):
+            rejected.append(RejectedFinding(
+                chunk_id=chunk.chunk_id, reason="schema",
+                raw={"error": "finding is not an object", "value": item},
+            ))
             continue
-        sev = str(item.get("severity", "low")).lower()
+
+        sev = str(item.get("severity", "")).lower()
         if sev not in ("info", "low", "medium", "high"):
-            sev = "low"
+            rejected.append(RejectedFinding(
+                chunk_id=chunk.chunk_id, reason="schema",
+                raw={"error": f"bad severity: {item.get('severity')!r}", "value": item},
+            ))
+            continue
+
         try:
-            line = int(item.get("line", chunk.start_line))
+            line = int(item.get("line"))
         except (TypeError, ValueError):
-            line = chunk.start_line
-        # Clamp to the chunk range so a hallucinated line number doesn't
-        # make it into the report unchecked.
-        line = max(chunk.start_line, min(chunk.end_line, line))
-        out.append(Finding(
+            rejected.append(RejectedFinding(
+                chunk_id=chunk.chunk_id, reason="schema",
+                raw={"error": "line missing or non-integer", "value": item},
+            ))
+            continue
+
+        if line < chunk.start_line or line > chunk.end_line:
+            rejected.append(RejectedFinding(
+                chunk_id=chunk.chunk_id, reason="out-of-range",
+                raw={
+                    "error": f"line {line} outside chunk range "
+                             f"[{chunk.start_line}, {chunk.end_line}]",
+                    "value": item,
+                },
+            ))
+            continue
+
+        evidence = str(item.get("evidence", "")).strip()
+        if not evidence:
+            rejected.append(RejectedFinding(
+                chunk_id=chunk.chunk_id, reason="evidence-missing",
+                raw={"error": "evidence is empty", "value": item},
+            ))
+            continue
+
+        if not _evidence_matches(evidence, line, chunk.start_line, chunk_lines):
+            rejected.append(RejectedFinding(
+                chunk_id=chunk.chunk_id, reason="evidence-missing",
+                raw={
+                    "error": "evidence not found in chunk near reported line",
+                    "value": item,
+                },
+            ))
+            continue
+
+        confidence = str(item.get("confidence", "medium")).lower()
+        if confidence not in ("low", "medium", "high"):
+            confidence = "medium"
+
+        findings.append(Finding(
             severity=sev,  # type: ignore[arg-type]
             category=str(item.get("category", "review"))[:64],
             line=line,
@@ -159,5 +244,24 @@ def _payload_to_findings(payload: dict, chunk: Chunk) -> list[Finding]:
             suggestion=str(item.get("suggestion", "")).strip()[:500],
             source="llm",
             chunk_id=chunk.chunk_id,
+            confidence=confidence,
+            evidence=evidence[:200],
         ))
-    return out
+
+    return findings, rejected
+
+
+def _evidence_matches(evidence: str, line: int, chunk_start: int, lines: list[str]) -> bool:
+    """True iff `evidence` (whitespace-normalized) is a substring of any source
+    line within ±2 of `line` (also whitespace-normalized).
+    """
+    needle = _norm_ws(evidence)
+    if not needle:
+        return False
+    rel = line - chunk_start
+    for off in (0, -1, 1, -2, 2):
+        idx = rel + off
+        if 0 <= idx < len(lines):
+            if needle in _norm_ws(lines[idx]):
+                return True
+    return False

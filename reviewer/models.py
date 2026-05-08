@@ -46,6 +46,9 @@ class ProjectContext:
     has_wm_delete_protocol: bool = False
     uses_update: bool = False  # raw .update() call
     uses_update_idletasks: bool = False
+    # method-name -> bindings that register that method as a handler.
+    # Built once per file so each chunk can attach an inbound table cheaply.
+    handler_inbound: dict[str, list[EventBinding]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -73,6 +76,7 @@ class ContextSlice:
     widget_tree_md: str
     bindings_md: str
     smells_md: str
+    inbound_md: str = ""
     notes: list[str] = field(default_factory=list)
 
 
@@ -95,6 +99,28 @@ class Finding:
     suggestion: str
     source: str  # "static" | "llm" | "parse-error"
     chunk_id: Optional[str] = None
+    confidence: str = "medium"
+    evidence: str = ""
+
+
+@dataclass(frozen=True)
+class RejectedFinding:
+    chunk_id: str
+    reason: str           # "out-of-range" | "evidence-missing" | "schema"
+    raw: dict
+
+
+@dataclass
+class ChunkResult:
+    """What the OpencodeClient produces for one chunk; useful for artifacts."""
+
+    chunk_id: str
+    prompt: str
+    stdout: str
+    parsed: Optional[dict]
+    findings: list[Finding] = field(default_factory=list)
+    rejected: list[RejectedFinding] = field(default_factory=list)
+    error: Optional[str] = None
 
 
 @dataclass
@@ -104,3 +130,4 @@ class Report:
     project: ProjectContext
     findings: list[Finding]
     chunk_failures: list[str] = field(default_factory=list)
+    rejected_count: int = 0

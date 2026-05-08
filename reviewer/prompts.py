@@ -70,11 +70,23 @@ SYSTEM_PROMPT = (
     "주어진 코드 조각과 사전 분석 컨텍스트만 보고 결함을 찾아주세요. "
     "다음 규칙을 반드시 지킵니다:\n"
     "1) 출력은 단 하나의 JSON 객체. 그 외 텍스트·마크다운·코드펜스 금지.\n"
-    "2) 스키마: {\"findings\": [{\"severity\": \"low|medium|high\", "
-    "\"category\": str, \"line\": int, \"message\": str, \"suggestion\": str}]}.\n"
-    "3) line 은 청크의 절대 라인 번호 (1부터 시작, 파일 기준).\n"
-    "4) 확신이 없으면 보고하지 말고 빈 findings 배열을 반환하세요.\n"
-    "5) 체크리스트 외 내용을 자유롭게 추가해도 되지만, 반드시 라인 번호를 명시해야 합니다."
+    "2) 스키마: {\"findings\": [{"
+    "\"severity\": \"low|medium|high\", "
+    "\"category\": str, "
+    "\"line\": int, "
+    "\"message\": str, "
+    "\"suggestion\": str, "
+    "\"confidence\": \"low|medium|high\", "
+    "\"evidence\": str"
+    "}]}.\n"
+    "3) line 은 코드 조각에 표시된 절대 라인 번호(1부터, 파일 기준)이며, "
+    "반드시 청크 라인 범위 안이어야 합니다. 범위를 벗어나면 그 finding 은 폐기됩니다.\n"
+    "4) evidence 는 해당 line 에서 그대로 발췌한 한 줄 원문(공백/들여쓰기 그대로). "
+    "코드 조각에 없는 문자열을 evidence 로 적으면 그 finding 은 폐기됩니다.\n"
+    "5) confidence: 라인+증거가 모두 명확하면 high, 추정이면 low.\n"
+    "6) 사전 분석 표(위젯/바인딩/inbound/스멜)에 이미 있는 항목은 다시 보고하지 마세요.\n"
+    "7) 확신이 없으면 보고하지 말고 빈 findings 배열을 반환하세요.\n"
+    "8) 체크리스트 외 내용을 자유롭게 추가해도 되지만, 반드시 line·evidence 를 채워야 합니다."
 )
 
 
@@ -86,13 +98,16 @@ def build_user_prompt(chunk: Chunk) -> str:
     notes = "\n".join(f"- {n}" for n in chunk.context.notes) or "_(없음)_"
     return f"""# 청크 정보
 - 제목: {chunk.title}
-- 라인 범위: {chunk.start_line} ~ {chunk.end_line}
+- 라인 범위: {chunk.start_line} ~ {chunk.end_line} (이 범위를 벗어난 line 은 폐기됨)
 
 # 사전 분석: 이 청크의 위젯
 {chunk.context.widget_tree_md}
 
-# 사전 분석: 이 청크의 이벤트/콜백
+# 사전 분석: 이 청크의 이벤트/콜백 (이 청크 안에서 등록된 것)
 {chunk.context.bindings_md}
+
+# 사전 분석: 이 청크의 메서드가 다른 곳에서 어떻게 핸들러로 등록되는지 (inbound)
+{chunk.context.inbound_md}
 
 # 사전 분석: 이 청크에 이미 발견된 정적 스멜 (참고용, 중복 보고 금지)
 {chunk.context.smells_md}
@@ -108,7 +123,7 @@ def build_user_prompt(chunk: Chunk) -> str:
 {_with_line_numbers(chunk)}
 ```
 
-위 지침에 따라 JSON만 출력하세요.
+위 지침에 따라 JSON만 출력하세요. evidence 는 위 코드의 해당 line 본문에서 그대로 따와야 합니다.
 """
 
 

@@ -1,3 +1,4 @@
+import json
 import stat
 from pathlib import Path
 
@@ -32,7 +33,6 @@ def test_extract_json_returns_none_when_missing():
 def _write_stub(tmp_path: Path, response: str) -> Path:
     """A fake `opencode` shell script that ignores stdin and prints `response`."""
     stub = tmp_path / "fake_opencode"
-    # No leading whitespace: shebang must be at byte 0.
     stub.write_text(
         "#!/bin/bash\n"
         "cat > /dev/null\n"
@@ -45,31 +45,79 @@ def _write_stub(tmp_path: Path, response: str) -> Path:
 
 
 @pytest.fixture
-def small_chunk():
+def chunk_with_pack():
+    """Pick the chunk containing 'self.left.pack(' so we have known evidence."""
     src = (Path(__file__).parent / "fixtures" / "small_app.py").read_text()
     ctx = analyze(src)
-    return split(src, ctx, max_chars=20_000)[0]
+    chunks = split(src, ctx, max_chars=20_000)
+    for c in chunks:
+        if "self.left.pack" in c.code:
+            return c
+    raise AssertionError("expected fixture to contain self.left.pack(")
 
 
-def test_review_chunk_parses_stub_output(tmp_path, small_chunk):
-    response = (
-        '{"findings": [{"severity": "high", "category": "test", '
-        '"line": 1, "message": "stub said high", "suggestion": "fix it"}]}'
-    )
-    stub = _write_stub(tmp_path, response)
+def _finding_obj(line, evidence, **overrides):
+    base = {
+        "severity": "high", "category": "test",
+        "line": line, "message": "stub finding",
+        "suggestion": "fix", "confidence": "high",
+        "evidence": evidence,
+    }
+    base.update(overrides)
+    return base
+
+
+def test_valid_finding_kept(tmp_path, chunk_with_pack):
+    line = next(i for i, ln in enumerate(chunk_with_pack.code.splitlines(), chunk_with_pack.start_line)
+                if "self.left.pack" in ln)
+    payload = {"findings": [_finding_obj(line, "self.left.pack(side=\"left\")")]}
+    stub = _write_stub(tmp_path, json.dumps(payload))
     client = OpencodeClient(OpencodeConfig(bin_path=str(stub), retries=0))
-    findings, err = client.review_chunk(small_chunk)
-    assert err is None
-    assert len(findings) == 1
-    assert findings[0].source == "llm"
-    assert findings[0].category == "test"
-    # Line is clamped into the chunk's range
-    assert small_chunk.start_line <= findings[0].line <= small_chunk.end_line
+    result = client.review_chunk(chunk_with_pack)
+    assert result.error is None
+    assert len(result.findings) == 1
+    assert result.findings[0].evidence.startswith("self.left.pack")
+    assert result.findings[0].confidence == "high"
+    assert result.rejected == []
 
 
-def test_review_chunk_handles_garbage(tmp_path, small_chunk):
+def test_out_of_range_line_rejected(tmp_path, chunk_with_pack):
+    payload = {"findings": [_finding_obj(99999, "self.left.pack(side=\"left\")")]}
+    stub = _write_stub(tmp_path, json.dumps(payload))
+    client = OpencodeClient(OpencodeConfig(bin_path=str(stub), retries=0))
+    result = client.review_chunk(chunk_with_pack)
+    assert result.findings == []
+    assert len(result.rejected) == 1
+    assert result.rejected[0].reason == "out-of-range"
+
+
+def test_evidence_mismatch_rejected(tmp_path, chunk_with_pack):
+    # Valid line but evidence string that does not appear near it.
+    line = chunk_with_pack.start_line + 1
+    payload = {"findings": [_finding_obj(line, "this string is not in the source at all")]}
+    stub = _write_stub(tmp_path, json.dumps(payload))
+    client = OpencodeClient(OpencodeConfig(bin_path=str(stub), retries=0))
+    result = client.review_chunk(chunk_with_pack)
+    assert result.findings == []
+    assert len(result.rejected) == 1
+    assert result.rejected[0].reason == "evidence-missing"
+
+
+def test_evidence_missing_rejected(tmp_path, chunk_with_pack):
+    line = chunk_with_pack.start_line + 1
+    payload = {"findings": [_finding_obj(line, "")]}
+    stub = _write_stub(tmp_path, json.dumps(payload))
+    client = OpencodeClient(OpencodeConfig(bin_path=str(stub), retries=0))
+    result = client.review_chunk(chunk_with_pack)
+    assert result.findings == []
+    assert result.rejected and result.rejected[0].reason == "evidence-missing"
+
+
+def test_garbage_returns_error(tmp_path, chunk_with_pack):
     stub = _write_stub(tmp_path, "this is not JSON at all")
     client = OpencodeClient(OpencodeConfig(bin_path=str(stub), retries=0))
-    findings, err = client.review_chunk(small_chunk)
-    assert findings == []
-    assert err is not None and "JSON" in err
+    result = client.review_chunk(chunk_with_pack)
+    assert result.findings == []
+    assert result.error is not None and "JSON" in result.error
+    assert result.parsed is None
+    assert result.stdout != ""  # captured for artifact

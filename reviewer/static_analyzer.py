@@ -63,6 +63,8 @@ def analyze(source: str) -> ProjectContext:
     ctx.smells.extend(_lost_photoimage_smells(tree))
     ctx.smells.extend(_blocking_in_handler_smells(tree, bindings))
 
+    ctx.handler_inbound = _index_handlers(bindings)
+
     if not ctx.has_wm_delete_protocol and ctx.has_mainloop:
         ctx.smells.append(StaticSmell(
             category="lifecycle",
@@ -83,6 +85,37 @@ def analyze(source: str) -> ProjectContext:
                 break
 
     return ctx
+
+
+# ---------------------------------------------------------------------------
+# Inbound handler index (Tkinter-specific: bind/command/after/trace/protocol)
+# ---------------------------------------------------------------------------
+
+def _index_handlers(bindings):
+    """Map method-name -> bindings that register it as an event handler.
+
+    Skips lambdas and call-result expressions like `fn()` since those are
+    either anonymous or the (broken) immediate-call mistake we already flag.
+    """
+    out: dict[str, list[EventBinding]] = {}
+    for b in bindings:
+        name = _handler_name_of(b.handler_repr)
+        if not name:
+            continue
+        out.setdefault(name, []).append(b)
+    return out
+
+
+def _handler_name_of(repr_str: str) -> Optional[str]:
+    s = (repr_str or "").strip()
+    if not s or s == "<missing>":
+        return None
+    if s.startswith("lambda"):
+        return None
+    if "(" in s:  # `fn()`, `partial(...)`, etc.
+        return None
+    last = s.split(".")[-1]
+    return last if last.isidentifier() else None
 
 
 # ---------------------------------------------------------------------------
